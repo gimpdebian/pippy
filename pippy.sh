@@ -1,7 +1,7 @@
 #!/bin/bash
-python_paths=$(find /usr/bin /usr/local/bin /bin -maxdepth 1 -type f -name "python*" 2>/dev/null)
+python_paths=$(find /usr/bin /usr/local/bin /bin ~/.local/bin ~/.local/lib ~ /opt -maxdepth 2 -type f -name "python*" 2>/dev/null)
 npm --version &>/dev/null && echo "npm is already installed, updating..." && npm install -g npm || echo "npm is not installed, installing..." && apt-get install -y npm || sudo apt-get install -y npm
-IFS=$'\n' read -r -a gradio_packages <<< "$(npm search @gradio --parseable --searchlimit=2147483647 | awk '{print $1}')"
+IFS=$' ' read -r -a gradio_packages <<< "$(npm search @gradio --parseable --searchlimit=2147483647 | awk '{print $1}' | tr '\n' ' ')"
 function module_available_on_pypi() {
     local module="$1"
     local response
@@ -20,7 +20,7 @@ highest_version=0
 highest_version_path=""
 for path in $python_paths; do
     version=$(echo "$path" | sed -E 's|.*/python([0-9.]+)|\1|')
-    if (( $(echo "$version > $highest_version" | bc -l) )); then
+    if ( echo "$version > $highest_version" | bc -l  && [[ "$version" =~ ^[0-9.]+$ ]]); then
         highest_version="$version"
         highest_version_path="$path"
     fi
