@@ -1,8 +1,16 @@
 #!/bin/bash
 python_paths=$(find /usr/bin /usr/local/bin /bin ~/.local/bin ~/.local/lib ~ /opt -maxdepth 2 -type f -name "python*" 2>/dev/null)
-npm --version &>/dev/null && echo "npm is already installed, updating..." && npm install -g npm || echo "npm is not installed, installing..." && apt-get install -y npm || sudo apt-get install -y npm
+if npm --version &>/dev/null && [ "$(npm --version)" != "$(npm view npm version)" ]; then
+  echo "updating npm..."
+  npm install npm@latest -g >/dev/null 2>&1
+else
+  echo "npm is not installed, installing..."
+  if ! apt-get install -y npm; then
+    sudo apt-get install -y npm
+  fi
+fi
 IFS=$' ' read -r -a gradio_packages <<< "$(npm search @gradio --parseable --searchlimit=2147483647 | awk '{print $1}' | tr '\n' ' ')"
-extract_js_values() {
+function extract_js_values() {
     echo "$1" > temp_script.py
     js_values=$("$highest_version_path" - <<EOF
 import ast
@@ -39,6 +47,33 @@ function module_available_on_pypi() {
         return 1
     fi
 }
+function import_to_pip() {
+    local import_name="$1"
+    declare -A import_map=(
+        ["yaml"]="PyYAML"
+        ["cv2"]="opencv-python"
+        ["bs4"]="beautifulsoup4"
+        ["PIL"]="Pillow"
+        ["sklearn"]="scikit-learn"
+        ["Crypto"]="pycryptodome"
+        ["Image"]="Pillow"
+        ["lxml"]="lxml"
+        ["cupy"]="cupy-cuda12x"
+    )
+    if [[ -n "${import_map[$import_name]}" ]]; then
+        echo "${import_map[$import_name]}"
+        return 0
+    fi
+    if command -v pigar &>/dev/null; then
+        local pigar_result
+        pigar_result=$(pigar search "$import_name" 2>/dev/null | awk 'NR==1{print $1}')
+        if [[ -n "$pigar_result" ]]; then
+            echo "$pigar_result"
+            return 0
+        fi
+    fi
+    echo "$import_name"
+}
 if [ -z "$python_paths" ]; then
     echo "Error: No Python interpreter found"
     exit 1
@@ -46,8 +81,8 @@ fi
 highest_version=0
 highest_version_path=""
 for path in $python_paths; do
-    version=$(echo "$path" | sed -E 's|.*/python([0-9.]+)|\1|')
-    if ( echo "$version > $highest_version" | bc -l  && [[ "$version" =~ ^[0-9.]+$ ]]); then
+    version=$(echo "$path" | sed -nE 's|.*/python([0-9.]+)$|\1|p')
+    if [[ "$version" =~ ^[0-9.]+$ ]] && ( echo "$version > $highest_version" | bc -l > /dev/null ); then
         highest_version="$version"
         highest_version_path="$path"
     fi
@@ -56,7 +91,12 @@ if [ -z "$highest_version_path" ]; then
     echo "Error: Failed to determine Python interpreter path"
     exit 1
 fi
-"$highest_version_path" -m ensurepip
+if [[ "$1" == "show-path" ]]; then
+    echo "$highest_version_path"
+    exit 0
+fi
+"$highest_version_path" -m ensurepip >/dev/null 2>&1
+command -v pigar >/dev/null 2>&1 || "$highest_version_path" -m pip install pigar >/dev/null 2>&1 
 script_name="$1"
 if [ ! -f "$script_name" ]; then
     echo "Error: script not found"
@@ -66,20 +106,47 @@ if [[ "$script_name" != *.py ]]; then
     echo "Error: not a Python script"
     exit 1
 fi
-library_names=$(grep -oP 'import\s+\K[a-zA-Z0-9_]+' "$script_name")
-for library in $library_names; do
+imports1=$(grep -oP '^\s*import\s+\K[a-zA-Z0-9_]+' "$script_name")
+imports2=$(grep -oP '^\s*from\s+\K[a-zA-Z0-9_]+' "$script_name")
+library_names=$(echo -e "$imports1\n$imports2" | sort -u | tr '\n' ' ')
+stdlib_modules=$("$highest_version_path" -c '
+import sys
+import pkgutil
+import sysconfig
+
+modules = set(sys.builtin_module_names)
+stdlib_path = sysconfig.get_paths()["stdlib"]
+
+for finder, name, ispkg in pkgutil.iter_modules([stdlib_path]):
+    modules.add(name)
+
+print("\n".join(sorted(modules)))
+')
+if [[ "$2" == "show-libraries" ]]; then
+    echo "$library_names"
+    exit 0
+fi
+for pkg in $library_names; do
+    if python -c "import $pkg" &>/dev/null && ! module_available_on_pypi "$pkg"; then
+        continue
+    fi
+    library=$(import_to_pip "$pkg")
     if module_available_on_pypi "$library"; then
-        if pip show "$library" &>/dev/null && (pip list --outdated | grep -q "^$library") && echo "true" || echo "false"; then
-            echo "Upgrading" "$library" "..."
-            "$highest_version_path" -m pip install --upgrade "$library"
-        else
-            echo "Installing" "$library" "..."
-            "$highest_version_path" -m pip install "$library"
+        if ! echo "$stdlib_modules" | grep -qx "$library"; then
+            if "$highest_version_path" -m pip show "$library" &>/dev/null; then
+                if "$highest_version_path" -m pip list --outdated --format=json | grep -q "\"$library\""; then
+                    echo "Upgrading $pkg ..."
+                    "$highest_version_path" -m pip install --upgrade "$library" >/dev/null 2>&1
+                fi
+            else
+                echo "Installing $pkg ..."
+                "$highest_version_path" -m pip install "$library" >/dev/null 2>&1
+            fi
         fi
     fi
 done
-code=$(cat "$script_name")
-library_names_js=$(grep -oP 'import\s+\K[a-zA-Z0-9_]+' extract_js_values "$code")
+code=$(cat "$script_name") >/dev/null 2>&1
+library_names_js=$(extract_js_values "$code")
 if [[ "$code" == *"import gradio as gr"* ]]; then
     echo "Installing gradio npm packages..."
     for package in "${gradio_packages[@]}"; do
@@ -87,9 +154,9 @@ if [[ "$code" == *"import gradio as gr"* ]]; then
     done
     if [ -n "$library_names_js" ]; then
         echo "Importing custom js npm packages..."
-        for library in $library_names; do
+        for library in $library_names_js; do
             if npm show "$library" &>/dev/null; then
-                if npm outdated --json "$library" | grep -q '"current"' && return 0 || return 1; then
+                if npm outdated --json "$library" | grep -q '"current"'; then
                     echo "Upgrading" "$library"
                     npm update --global "$library"
                 else
