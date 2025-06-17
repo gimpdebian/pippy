@@ -1,8 +1,10 @@
 #!/bin/bash
 python_paths=$(find /usr/bin /usr/local/bin /bin ~/.local/bin ~/.local/lib ~ /opt -maxdepth 2 -type f -name "python*" 2>/dev/null)
-if npm --version &>/dev/null && [ "$(npm --version)" != "$(npm view npm version)" ]; then
-  echo "updating npm..."
-  npm install npm@latest -g >/dev/null 2>&1
+if npm --version &>/dev/null; then
+  if [ "$(npm --version)" != "$(npm view npm version)" ]; then
+    echo "updating npm..."
+    npm install npm@latest -g >/dev/null 2>&1
+  fi
 else
   echo "npm is not installed, installing..."
   if ! apt-get install -y npm; then
